@@ -1,7 +1,8 @@
 import os
 import asyncio
+from datetime import datetime
 from dotenv import load_dotenv
-from db import get_pool
+from db import get_session
 
 load_dotenv()
 
@@ -9,7 +10,7 @@ SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 SLACK_CHANNEL_ID = os.getenv("SLACK_CHANNEL_ID")
 
 async def process_pending_events():
-    pool = await get_pool()
+    pool = await get_session()
     async with pool.acquire() as conn:
 
         # 아직 처리 안 된 이벤트만 가져옴
@@ -126,6 +127,60 @@ async def _handle_submission(conn, row):
         row["thread_ts"]
     )
     print(f"[제출 저장] student={row['user_id']} / assignment={assignment['assignment_id']}")
+
+
+async def save_announcement(event: dict, parsed: dict):
+    from db import get_session
+    from models import Professor, Class, Assignment, AssignmentRequirement
+    from sqlalchemy import select
+
+    async with get_session() as session:
+
+        # 중복 체크
+        existing = await session.scalar(
+            select(Assignment).where(Assignment.slack_post_ts == event.get("ts"))
+        )
+        if existing:
+            print(f"[공지 중복 스킵] ts={event.get('ts')}")
+            return
+
+        # professor 조회
+        professor = await session.scalar(
+            select(Professor).where(Professor.slack_user_id == event.get("user"))
+        )
+        if not professor:
+            print(f"[경고] professor 없음: slack_user_id={event.get('user')}")
+
+        # class 조회
+        class_row = await session.scalar(
+            select(Class).where(Class.slack_channel_id == event.get("channel"))
+        )
+
+        # deadline 문자열 → datetime
+        deadline = datetime.fromisoformat(parsed["deadline"])
+
+        # assignment INSERT
+        assignment = Assignment(
+            class_id=class_row.class_id if class_row else None,
+            professor_id=professor.professor_id if professor else None,
+            title=parsed.get("title"),
+            content=parsed.get("content"),
+            topic=parsed.get("topic"),
+            deadline=deadline,
+            slack_post_ts=event.get("ts"),
+        )
+        session.add(assignment)
+        await session.flush()  # assignment_id 확보
+        print(f"[과제 저장] assignment_id={assignment.assignment_id}")
+
+        # requirements INSERT
+        requirements = [
+            AssignmentRequirement(assignment_id=assignment.assignment_id, content=req)
+            for req in parsed.get("requirements", [])
+        ]
+        session.add_all(requirements)
+        await session.commit()
+        print(f"[요구사항 저장] {len(requirements)}개")
 
 
 if __name__ == "__main__":
