@@ -167,33 +167,18 @@ async def health_check():
 
 @app.post("/slack/events")
 async def handle_slack_events(request: Request):
-    # if request.headers.get("x-slack-retry-num"):
-    #     return {"ok": True}
+    if request.headers.get("x-slack-retry-num"):
+        return {"ok": True}
 
-    # body_bytes = await request.body()
-    # timestamp = request.headers.get("x-slack-request-timestamp", "")
-    # signature = request.headers.get("x-slack-signature", "")
+    body_bytes = await request.body()
+    timestamp = request.headers.get("x-slack-request-timestamp", "")
+    signature = request.headers.get("x-slack-signature", "")
 
-    # if not verify_slack_signature(body_bytes, timestamp, signature):
-    #     raise HTTPException(status_code=403, detail="Invalid signature")
+    if not verify_slack_signature(body_bytes, timestamp, signature):
+        raise HTTPException(status_code=403, detail="Invalid signature")
 
-    # body = json.loads(body_bytes)
-    body = {
-  "type": "event_callback",
-  "event": {
-    "type": "message",
-    "user": "U0A6L0TM0R1",
-    "text": "[Day2-2 실습안내]\nBase Code를 참고하여, 주어진 판매 데이터에서 Segmentation(고객 세분화)를 진행해보세요.\n - 비교를 통해 적절한 Clustering method를 선택\n - Cluster별 분석을 통해 Profiling 분석(고객 특징 분석)\n\n위의 설정, 결과 캡처본과 결과에 대한 의견을 댓글로 올려주세요.",
-    "ts": "1771724085.250809",
-    "channel": "C0AFTP38S8N",
-    "channel_type": "group",
-    "event_ts": "1771724085.250809"
-  },
-  "team_id": "T089ENT4A2D",
-  "api_app_id": "A0AFXR54U5V",
-  "event_id": "Ev0AH7J2N2AU",
-  "event_time": 1771724085
-}
+    body = json.loads(body_bytes)
+    
     if body.get("type") == "url_verification":
         return {"challenge": body.get("challenge")}
 
