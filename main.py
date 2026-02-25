@@ -116,19 +116,36 @@
 #             result += [None, None, None, None]
 #     return result
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from dotenv import load_dotenv
+from sqlalchemy import text
+from db import engine
+from llm import parse_announcement
+from processor import save_announcement
 import json
 import os
 import hmac
 import hashlib
 import time
+from datetime import datetime, timedelta
 
 load_dotenv()
 
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with engine.connect() as conn:
+        await conn.execute(text("SELECT 1"))
+    print("[DB] 연결 성공")
+    yield
+    await engine.dispose()
+    print("[DB] 연결 종료")
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 def verify_slack_signature(body: bytes, timestamp: str, signature: str) -> bool:
@@ -150,18 +167,33 @@ async def health_check():
 
 @app.post("/slack/events")
 async def handle_slack_events(request: Request):
-    if request.headers.get("x-slack-retry-num"):
-        return {"ok": True}
+    # if request.headers.get("x-slack-retry-num"):
+    #     return {"ok": True}
 
-    body_bytes = await request.body()
-    timestamp = request.headers.get("x-slack-request-timestamp", "")
-    signature = request.headers.get("x-slack-signature", "")
+    # body_bytes = await request.body()
+    # timestamp = request.headers.get("x-slack-request-timestamp", "")
+    # signature = request.headers.get("x-slack-signature", "")
 
-    if not verify_slack_signature(body_bytes, timestamp, signature):
-        raise HTTPException(status_code=403, detail="Invalid signature")
+    # if not verify_slack_signature(body_bytes, timestamp, signature):
+    #     raise HTTPException(status_code=403, detail="Invalid signature")
 
-    body = json.loads(body_bytes)
-
+    # body = json.loads(body_bytes)
+    body = {
+  "type": "event_callback",
+  "event": {
+    "type": "message",
+    "user": "U0A6L0TM0R1",
+    "text": "[Day2-2 실습안내]\nBase Code를 참고하여, 주어진 판매 데이터에서 Segmentation(고객 세분화)를 진행해보세요.\n - 비교를 통해 적절한 Clustering method를 선택\n - Cluster별 분석을 통해 Profiling 분석(고객 특징 분석)\n\n위의 설정, 결과 캡처본과 결과에 대한 의견을 댓글로 올려주세요.",
+    "ts": "1771724085.250809",
+    "channel": "C0AFTP38S8N",
+    "channel_type": "group",
+    "event_ts": "1771724085.250809"
+  },
+  "team_id": "T089ENT4A2D",
+  "api_app_id": "A0AFXR54U5V",
+  "event_id": "Ev0AH7J2N2AU",
+  "event_time": 1771724085
+}
     if body.get("type") == "url_verification":
         return {"challenge": body.get("challenge")}
 
@@ -189,8 +221,28 @@ async def handle_slack_events(request: Request):
         for f in files:
             print(f"  - {f.get('name')} ({f.get('mimetype')})")
 
-    print("판단          :", "학생 제출" if event.get("thread_ts") else "교수님 공지")
+    is_announcement = not event.get("thread_ts")
+    print("판단          :", "교수님 공지" if is_announcement else "학생 제출")
     print("="*50 + "\n")
+
+    if is_announcement and event.get("text"):
+        try:
+            parsed = await parse_announcement(event.get("text"))
+            if not parsed.get('deadline'):
+                ts_value = float(event.get("ts")) 
+                base_date = datetime.fromtimestamp(ts_value)
+                calculated_deadline = (base_date + timedelta(days=7)).strftime('%Y-%m-%d')
+                parsed['deadline'] = calculated_deadline
+
+            print("[LLM 파싱 결과]")
+            print(f"  제목        : {parsed.get('title')}")
+            print(f"  주제        : {parsed.get('topic')}")
+            print(f"  마감일      : {parsed.get('deadline')}")
+            print(f"  요구사항    : {parsed.get('requirements')}")
+            print()
+            await save_announcement(event, parsed)
+        except Exception as e:
+            print(f"[처리 실패] {e}")
 
     return {"ok": True}
 
