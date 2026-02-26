@@ -123,6 +123,7 @@ from sqlalchemy import text
 from db import engine
 from llm import parse_announcement
 from processor import save_announcement
+from routers.auth import router as auth_router
 import json
 import os
 import hmac
@@ -146,6 +147,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.include_router(auth_router)
 
 
 def verify_slack_signature(body: bytes, timestamp: str, signature: str) -> bool:
@@ -178,7 +180,8 @@ async def handle_slack_events(request: Request):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
     body = json.loads(body_bytes)
-    
+    print("body: ", body)
+
     if body.get("type") == "url_verification":
         return {"challenge": body.get("challenge")}
 
