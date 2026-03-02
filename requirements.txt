@@ -3,3 +3,7 @@ uvicorn
 httpx
 python-dotenv
 asyncpg
+google-generativeai
+sqlalchemy[asyncio]
+slack-sdk
+bcrypt

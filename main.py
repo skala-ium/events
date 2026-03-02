@@ -116,21 +116,61 @@
 #             result += [None, None, None, None]
 #     return result
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from sqlalchemy import select, text
+from db import engine, get_session
+from llm import parse_announcement
+from models import Professor
+from processor import save_announcement
+from routers.auth import router as auth_router
 import json
 import os
 import hmac
 import hashlib
 import time
 import httpx
+from datetime import datetime, timedelta
+
 
 load_dotenv()
 
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 
-app = FastAPI()
+ASSIGNMENT_KEYWORDS = [
+    "과제", "제출", "마감", "assignment", "submit", "deadline",
+    "homework", "프로젝트", "보고서", "발표"
+]
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    async with engine.connect() as conn:
+        await conn.execute(text("SELECT 1"))
+    print("[DB] 연결 성공")
+    yield
+    await engine.dispose()
+    print("[DB] 연결 종료")
+
+
+app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(auth_router)
+
+
+def has_assignment_keyword(text: str) -> bool:
+    text_lower = text.lower()
+    return any(kw in text_lower for kw in ASSIGNMENT_KEYWORDS)
 
 
 def verify_slack_signature(body: bytes, timestamp: str, signature: str) -> bool:
@@ -276,6 +316,7 @@ async def handle_slack_events(request: Request):
         raise HTTPException(status_code=403, detail="Invalid signature")
 
     body = json.loads(body_bytes)
+    print("body: ", body)
 
     if body.get("type") == "url_verification":
         return {"challenge": body.get("challenge")}
@@ -306,8 +347,46 @@ async def handle_slack_events(request: Request):
         for f in files:
             print(f"  - {f.get('name')} ({f.get('mimetype')})")
 
-    print("판단          :", "학생 제출" if event.get("thread_ts") else "교수님 공지")
+    # 교수님 여부 확인 (DB 조회)
+    user_id = event.get("user")
+    async with get_session() as session:
+        professor = await session.scalar(
+            select(Professor).where(Professor.slack_user_id == user_id)
+        )
+    is_professor = professor is not None
+
+    is_announcement = not event.get("thread_ts") and is_professor
+    if is_professor:
+        print("판단          :", "교수님 공지 후보" if is_announcement else "학생 제출")
+    else:
+        print("판단          : 교수님 메시지 아님 → 스킵")
     print("="*50 + "\n")
+
+    if not is_professor:
+        return {"ok": True}
+
+    if is_announcement and event.get("text"):
+        if not has_assignment_keyword(event.get("text")):
+            print("[스킵] 과제 관련 키워드 없음")
+            return {"ok": True}
+
+        try:
+            parsed = await parse_announcement(event.get("text"))
+            if not parsed.get('deadline'):
+                ts_value = float(event.get("ts"))
+                base_date = datetime.fromtimestamp(ts_value)
+                calculated_deadline = (base_date + timedelta(days=7)).strftime('%Y-%m-%d')
+                parsed['deadline'] = calculated_deadline
+
+            print("[LLM 파싱 결과]")
+            print(f"  제목        : {parsed.get('title')}")
+            print(f"  주제        : {parsed.get('topic')}")
+            print(f"  마감일      : {parsed.get('deadline')}")
+            print(f"  요구사항    : {parsed.get('requirements')}")
+            print()
+            await save_announcement(event, parsed)
+        except Exception as e:
+            print(f"[처리 실패] {e}")
 
     return {"ok": True}
 
