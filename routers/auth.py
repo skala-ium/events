@@ -41,6 +41,7 @@ class SignupRequest(BaseModel):
     name: str
     password: str
     major: str | None = None
+    class_id: uuid.UUID | None = None
 
 
 @router.post("/auth/slack/send-code")
@@ -105,6 +106,7 @@ async def signup(req: SignupRequest):
         name=req.name,
         password=hashed_pw,
         major=req.major,
+        class_id=req.class_id,
         created_at=now,
         updated_at=now,
     )
