@@ -123,10 +123,12 @@ import os
 import hmac
 import hashlib
 import time
+import httpx
 
 load_dotenv()
 
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
+SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 
 app = FastAPI()
 
@@ -146,6 +148,119 @@ def verify_slack_signature(body: bytes, timestamp: str, signature: str) -> bool:
 @app.get("/")
 async def health_check():
     return {"status": "ok"}
+
+
+async def get_channel_members_info(channel_id: str) -> str:
+    """채널 멤버 목록 조회 및 정보 반환"""
+    headers = {
+        "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    try:
+        async with httpx.AsyncClient() as client:
+            # 1. 채널 멤버 목록 조회
+            members_response = await client.get(
+                "https://slack.com/api/conversations.members",
+                headers=headers,
+                params={"channel": channel_id}
+            )
+            members_data = members_response.json()
+
+            if not members_data.get("ok"):
+                error_msg = f"❌ 멤버 목록 조회 실패: {members_data.get('error')}"
+                print(error_msg)
+                return error_msg
+
+            member_ids = members_data.get("members", [])
+
+            print("\n" + "="*50)
+            print(f"채널 ID       : {channel_id}")
+            print(f"전체 멤버 수  : {len(member_ids)}")
+            print("="*50)
+
+            # 2. 각 멤버의 상세 정보 조회
+            human_members = []
+            for user_id in member_ids:
+                user_response = await client.get(
+                    "https://slack.com/api/users.info",
+                    headers=headers,
+                    params={"user": user_id}
+                )
+                user_data = user_response.json()
+
+                if not user_data.get("ok"):
+                    print(f"⚠️  유저 정보 조회 실패 ({user_id}): {user_data.get('error')}")
+                    continue
+
+                user = user_data.get("user", {})
+
+                # 봇/앱 제외
+                if user.get("is_bot") or user.get("is_app_user"):
+                    continue
+
+                human_members.append(user)
+
+            print(f"\n사람 멤버 수  : {len(human_members)}")
+            print("-"*50)
+
+            # 3. 콘솔 출력
+            result_lines = [f"📋 채널 멤버 목록 (총 {len(human_members)}명)\n"]
+
+            for idx, user in enumerate(human_members, 1):
+                real_name = user.get('real_name', user.get('name', 'Unknown'))
+                username = user.get('name')
+                email = user.get('profile', {}).get('email', 'N/A')
+
+                print(f"\n[{idx}] {real_name}")
+                print(f"    ID         : {user.get('id')}")
+                print(f"    Username   : {username}")
+                print(f"    Email      : {email}")
+                print(f"    Display    : {user.get('profile', {}).get('display_name', 'N/A')}")
+                print(f"    Status     : {user.get('profile', {}).get('status_text', '')}")
+                print(f"    Deleted    : {user.get('deleted', False)}")
+
+                # Slack 응답용 텍스트
+                result_lines.append(f"{idx}. *{real_name}* (@{username})")
+                result_lines.append(f"   Email: {email}\n")
+
+            print("\n" + "="*50 + "\n")
+
+            return "\n".join(result_lines)
+
+    except Exception as e:
+        error_msg = f"❌ 에러 발생: {str(e)}"
+        print(error_msg)
+        return error_msg
+
+
+@app.post("/slack/command")
+async def handle_slack_commands(request: Request):
+    """Slack Slash Command 처리"""
+    form_data = await request.form()
+
+    command = form_data.get("command")
+    channel_id = form_data.get("channel_id")
+    user_id = form_data.get("user_id")
+
+    print("\n" + "="*50)
+    print(f"Slash Command : {command}")
+    print(f"채널 ID       : {channel_id}")
+    print(f"실행자 ID     : {user_id}")
+    print("="*50)
+
+    if command == "/userlist":
+        result_text = await get_channel_members_info(channel_id)
+
+        return {
+            "response_type": "ephemeral",  # 본인만 보임
+            "text": result_text
+        }
+
+    return {
+        "response_type": "ephemeral",
+        "text": "알 수 없는 명령어입니다."
+    }
 
 
 @app.post("/slack/events")
@@ -169,8 +284,10 @@ async def handle_slack_events(request: Request):
         return {"ok": True}
 
     event = body.get("event", {})
+    event_type = event.get("type")
 
-    if event.get("type") != "message":
+    # message 이벤트 처리 (기존 로직)
+    if event_type != "message":
         return {"ok": True}
 
     # DB 없이 일단 콘솔에 출력
