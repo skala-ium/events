@@ -120,9 +120,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-from sqlalchemy import text
-from db import engine
+from sqlalchemy import select, text
+from db import engine, get_session
 from llm import parse_announcement
+from models import Professor
 from processor import save_announcement
 from routers.auth import router as auth_router
 import json
@@ -135,6 +136,11 @@ from datetime import datetime, timedelta
 load_dotenv()
 
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
+
+ASSIGNMENT_KEYWORDS = [
+    "과제", "제출", "마감", "assignment", "submit", "deadline",
+    "homework", "프로젝트", "보고서", "발표"
+]
 
 
 @asynccontextmanager
@@ -157,6 +163,11 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+
+
+def has_assignment_keyword(text: str) -> bool:
+    text_lower = text.lower()
+    return any(kw in text_lower for kw in ASSIGNMENT_KEYWORDS)
 
 
 def verify_slack_signature(body: bytes, timestamp: str, signature: str) -> bool:
@@ -218,15 +229,33 @@ async def handle_slack_events(request: Request):
         for f in files:
             print(f"  - {f.get('name')} ({f.get('mimetype')})")
 
-    is_announcement = not event.get("thread_ts")
-    print("판단          :", "교수님 공지" if is_announcement else "학생 제출")
+    # 교수님 여부 확인 (DB 조회)
+    user_id = event.get("user")
+    async with get_session() as session:
+        professor = await session.scalar(
+            select(Professor).where(Professor.slack_user_id == user_id)
+        )
+    is_professor = professor is not None
+
+    is_announcement = not event.get("thread_ts") and is_professor
+    if is_professor:
+        print("판단          :", "교수님 공지 후보" if is_announcement else "학생 제출")
+    else:
+        print("판단          : 교수님 메시지 아님 → 스킵")
     print("="*50 + "\n")
 
+    if not is_professor:
+        return {"ok": True}
+
     if is_announcement and event.get("text"):
+        if not has_assignment_keyword(event.get("text")):
+            print("[스킵] 과제 관련 키워드 없음")
+            return {"ok": True}
+
         try:
             parsed = await parse_announcement(event.get("text"))
             if not parsed.get('deadline'):
-                ts_value = float(event.get("ts")) 
+                ts_value = float(event.get("ts"))
                 base_date = datetime.fromtimestamp(ts_value)
                 calculated_deadline = (base_date + timedelta(days=7)).strftime('%Y-%m-%d')
                 parsed['deadline'] = calculated_deadline
